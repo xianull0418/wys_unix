@@ -1,0 +1,28 @@
+douban_movie/
+├── config/
+│   └── config.py           # 配置文件
+├── crawler/
+│   ├── __init__.py
+│   ├── movie_crawler.py    # 电影爬虫
+│   ├── comment_crawler.py  # 评论爬虫
+│   └── proxy_manager.py    # 代理管理
+├── database/
+│   ├── __init__.py
+│   ├── models.py          # 数据库模型
+│   └── db_manager.py      # 数据库管理
+├── analysis/
+│   ├── __init__.py
+│   ├── data_cleaner.py    # 数据清洗
+│   ├── sentiment.py       # 情感分析
+│   └── visualizer.py      # 数据可视化
+├── web/
+│   ├── __init__.py
+│   ├── static/
+│   ├── templates/
+│   ├── routes.py          # API路由
+│   └── app.py            # Flask应用
+├── utils/
+│   ├── __init__.py
+│   └── helpers.py        # 工具函数
+├── requirements.txt      # 项目依赖
+└── main.py              # 主程序入口 
