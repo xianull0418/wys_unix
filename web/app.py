@@ -14,8 +14,18 @@ def create_app():
     app.static_folder = 'static'
     
     # 确保静态文件目录存在
-    os.makedirs(os.path.join(app.root_path, 'static', 'images'), exist_ok=True)
-    os.makedirs(os.path.join(app.root_path, 'static', 'analysis'), exist_ok=True)
+    static_dir = os.path.join(app.root_path, 'static')
+    analysis_dir = os.path.join(static_dir, 'analysis')
+    os.makedirs(analysis_dir, exist_ok=True)
+    
+    # 为每部电影创建单独的目录
+    def ensure_movie_dir(douban_id):
+        movie_dir = os.path.join(analysis_dir, str(douban_id))
+        os.makedirs(movie_dir, exist_ok=True)
+        return movie_dir
+    
+    # 将函数添加到应用上下文
+    app.ensure_movie_dir = ensure_movie_dir
     
     # 初始化数据库管理器
     db_manager = DatabaseManager()
@@ -54,11 +64,14 @@ def create_app():
         try:
             movies = db_manager.get_all_movies()
             return jsonify({
-                'movies': movies  # movies 已经是字典列表了，不需要再次转换
+                'movies': movies
             })
         except Exception as e:
             logger.error(f"获取电影列表失败: {str(e)}")
-            return jsonify({'error': str(e)}), 500
+            return jsonify({
+                'error': str(e),
+                'message': '获取电影列表失败'
+            }), 500
     
     @app.route('/api/movies/add', methods=['POST'])
     def add_movie():
@@ -72,11 +85,11 @@ def create_app():
             # 爬取电影详情信息
             movie_data = movie_crawler.get_movie_detail(douban_id)
             # 保存到数据库
-            movie = db_manager.save_movie(movie_data)
+            movie_info = db_manager.save_movie(movie_data)
             
             return jsonify({
                 'message': '添加成功',
-                'movie_id': movie.id
+                'movie': movie_info
             })
         except Exception as e:
             logger.error(f"添加电影失败: {str(e)}")
@@ -95,5 +108,26 @@ def create_app():
         except Exception as e:
             logger.error(f"分析电影失败: {str(e)}")
             return jsonify({'error': str(e)}), 500
+    
+    @app.route('/api/movies/<string:douban_id>/analysis', methods=['GET'])
+    def get_movie_analysis(douban_id):
+        """获取电影分析结果"""
+        try:
+            # 从数据库获取分析结果
+            analysis_result = db_manager.get_analysis_result(douban_id)
+            if not analysis_result:
+                logger.error(f"未找到电影 {douban_id} 的分析结果")
+                return jsonify({
+                    'error': '未找到分析结果',
+                    'message': '该电影可能尚未分析或分析结果已被删除'
+                }), 404
+            
+            return jsonify(analysis_result)
+        except Exception as e:
+            logger.error(f"获取分析结果失败: {str(e)}")
+            return jsonify({
+                'error': str(e),
+                'message': '获取分析结果失败，请稍后重试'
+            }), 500
     
     return app 

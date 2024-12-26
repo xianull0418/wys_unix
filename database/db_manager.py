@@ -4,6 +4,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker, Session
 from sqlalchemy.exc import SQLAlchemyError
 from datetime import datetime
+import json
 
 from .models import Base, Movie, Comment, ProxyPool, AnalysisResult
 from config.config import Config
@@ -16,7 +17,8 @@ class DatabaseManager:
         # 创建MySQL数据库连接
         self.engine = create_engine(
             f'mysql+pymysql://{self.config.MYSQL_USER}:{self.config.MYSQL_PASSWORD}'
-            f'@{self.config.MYSQL_HOST}:{self.config.MYSQL_PORT}/{self.config.MYSQL_DATABASE}',
+            f'@{self.config.MYSQL_HOST}:{self.config.MYSQL_PORT}/{self.config.MYSQL_DATABASE}'
+            '?charset=utf8mb4',
             pool_size=5,
             max_overflow=10,
             pool_timeout=30,
@@ -161,15 +163,19 @@ class DatabaseManager:
             # 转换为字典列表，包含所有需要的字段
             return [{
                 'id': movie.id,
+                'douban_id': movie.douban_id,
                 'name': movie.name,
                 'rating': movie.rating,
                 'director': movie.director,
                 'img': movie.img_url,  # 注意这里用 img 而不是 img_url
                 'year': movie.year,
                 'sub_title': movie.sub_title,
-                'analyzed': movie.analyzed,
-                'douban_id': movie.douban_id
+                'genre': movie.genre,  # 添加 genre 字段
+                'analyzed': movie.analyzed
             } for movie in movies]
+        except Exception as e:
+            self.logger.error(f"获取电影列表失败: {str(e)}")
+            raise
         finally:
             session.close()
     
@@ -203,33 +209,51 @@ class DatabaseManager:
             session.close()
     
     def save_movie(self, movie_data: Dict[str, Any]) -> Movie:
-        """保存单部电影"""
+        """保存电影信息"""
         session = self.get_session()
         try:
             # 检查电影是否已存在
             existing_movie = session.query(Movie).filter(Movie.douban_id == movie_data['douban_id']).first()
             
             if existing_movie:
-                session.refresh(existing_movie)  # 刷新现有对象
-                return existing_movie
+                # 更新现有电影信息
+                for key, value in movie_data.items():
+                    if hasattr(existing_movie, key):
+                        setattr(existing_movie, key, value)
+                movie = existing_movie
+            else:
+                # 创建新电影
+                movie = Movie(**movie_data)
+                session.add(movie)
             
-            # 创建新电影记录
-            movie = Movie(
-                douban_id=movie_data['douban_id'],
-                name=movie_data['name'],
-                rating=movie_data.get('rating'),
-                director=movie_data.get('director', '未知'),
-                actors=movie_data.get('actors', ''),
-                genre=movie_data.get('genre', ''),
-                release_date=movie_data.get('release_date'),
-                img_url=movie_data.get('img_url'),  # 保存图片URL
-                year=movie_data.get('year'),        # 保存年份
-                sub_title=movie_data.get('sub_title')  # 保存副标题
-            )
-            session.add(movie)
+            # 先提交以获取movie.id
             session.commit()
-            session.refresh(movie)  # 刷新新对象
-            return movie
+            
+            # 检查是否有分析结果
+            has_analysis = session.query(AnalysisResult).filter(
+                AnalysisResult.movie_id == movie.id
+            ).first() is not None
+            
+            # 更新分析状态并再次提交
+            movie.analyzed = has_analysis
+            session.commit()
+            
+            # 创建一个新的字典来返回电影信息
+            movie_info = {
+                'id': movie.id,
+                'douban_id': movie.douban_id,
+                'name': movie.name,
+                'rating': movie.rating,
+                'director': movie.director,
+                'img_url': movie.img_url,
+                'year': movie.year,
+                'sub_title': movie.sub_title,
+                'genre': movie.genre,
+                'analyzed': movie.analyzed
+            }
+            
+            return movie_info
+            
         except Exception as e:
             session.rollback()
             self.logger.error(f"保存电影失败: {str(e)}")
@@ -237,33 +261,112 @@ class DatabaseManager:
         finally:
             session.close()
     
-    def save_analysis_result(self, movie_id: int, result: Dict[str, Any]) -> AnalysisResult:
+    def save_analysis_result(self, movie_id: str, result: Dict[str, Any]) -> AnalysisResult:
         """保存分析结果"""
         session = self.get_session()
         try:
-            # 检查是否已有分析结果
-            existing_result = session.query(AnalysisResult).filter(AnalysisResult.movie_id == movie_id).first()
+            # 获取电影
+            movie = session.query(Movie).filter(Movie.douban_id == movie_id).first()
+            if not movie:
+                raise ValueError(f"未找到电影: {movie_id}")
+            
+            # 检查���否已有分析结果
+            existing_result = session.query(AnalysisResult).filter(
+                AnalysisResult.movie_id == movie.id
+            ).first()
             
             if existing_result:
                 # 更新现有结果
-                for key, value in result.items():
-                    setattr(existing_result, key, value)
+                existing_result.wordcloud_path = result['wordcloud_path']
+                existing_result.sentiment_chart_path = result['sentiment_chart_path']
+                existing_result.time_dist_path = result['time_dist_path']
+                existing_result.length_dist_path = result['length_dist_path']
+                
+                # 更新情感分析统计
+                existing_result.positive_count = result['sentiment_stats']['positive']
+                existing_result.neutral_count = result['sentiment_stats']['neutral']
+                existing_result.negative_count = result['sentiment_stats']['negative']
+                existing_result.total_comments = result['total_comments']
+                existing_result.avg_sentiment_score = result['avg_sentiment_score']
+                
+                # 更新评论长度统计
+                existing_result.short_comments = result['length_stats']['short']
+                existing_result.medium_comments = result['length_stats']['medium']
+                existing_result.long_comments = result['length_stats']['long']
+                
+                # 更新热门词统计
+                existing_result.top_words = json.dumps(result['top_words'], ensure_ascii=False)
+                
                 analysis_result = existing_result
             else:
                 # 创建新结果
-                result['movie_id'] = movie_id
-                analysis_result = AnalysisResult(**result)
+                analysis_result = AnalysisResult(
+                    movie_id=movie.id,
+                    wordcloud_path=result['wordcloud_path'],
+                    sentiment_chart_path=result['sentiment_chart_path'],
+                    time_dist_path=result['time_dist_path'],
+                    length_dist_path=result['length_dist_path'],
+                    positive_count=result['sentiment_stats']['positive'],
+                    neutral_count=result['sentiment_stats']['neutral'],
+                    negative_count=result['sentiment_stats']['negative'],
+                    total_comments=result['total_comments'],
+                    avg_sentiment_score=result['avg_sentiment_score'],
+                    short_comments=result['length_stats']['short'],
+                    medium_comments=result['length_stats']['medium'],
+                    long_comments=result['length_stats']['long'],
+                    top_words=json.dumps(result['top_words'], ensure_ascii=False)
+                )
                 session.add(analysis_result)
             
-            # 更新电影分析状态
-            movie = session.query(Movie).get(movie_id)
-            if movie:
-                movie.analyzed = True
+            # 更新电影分析���态
+            movie.analyzed = True
             
             session.commit()
             return analysis_result
         except Exception as e:
             session.rollback()
+            self.logger.error(f"保存分析结果失败: {str(e)}")
             raise
+        finally:
+            session.close()
+    
+    def get_analysis_result(self, douban_id: str) -> Optional[Dict[str, Any]]:
+        """获取电影分析结果"""
+        session = self.get_session()
+        try:
+            movie = session.query(Movie).filter(Movie.douban_id == douban_id).first()
+            if not movie:
+                self.logger.error(f"未找到电影: {douban_id}")
+                return None
+            
+            result = session.query(AnalysisResult).filter(AnalysisResult.movie_id == movie.id).first()
+            if not result:
+                self.logger.error(f"未找到电影 {douban_id} 的分析结果")
+                return None
+            
+            return {
+                'wordcloud_path': result.wordcloud_path,
+                'sentiment_chart_path': result.sentiment_chart_path,
+                'time_dist_path': result.time_dist_path,
+                'length_dist_path': result.length_dist_path,
+                'sentiment_stats': {
+                    'positive': result.positive_count,
+                    'neutral': result.neutral_count,
+                    'negative': result.negative_count,
+                    'total': result.total_comments,
+                    'avg_score': result.avg_sentiment_score
+                },
+                'length_stats': {
+                    'short': result.short_comments,
+                    'medium': result.medium_comments,
+                    'long': result.long_comments
+                },
+                'top_words': json.loads(result.top_words) if result.top_words else [],
+                'total_comments': result.total_comments,
+                'avg_sentiment_score': result.avg_sentiment_score
+            }
+        except Exception as e:
+            self.logger.error(f"获取分析结果失败: {str(e)}")
+            return None
         finally:
             session.close() 

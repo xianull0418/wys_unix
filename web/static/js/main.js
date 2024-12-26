@@ -190,11 +190,13 @@ function showToast(message, type = 'info') {
 // 分析电影
 async function analyzeMovie(doubanId) {
     try {
-        const button = event.target;
+        // 显示加载状态
+        const button = event.target.closest('button');
         const originalText = button.innerHTML;
         button.disabled = true;
         button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> 分析中...';
         
+        // 发送分析请求
         const response = await fetch(`/api/movies/${doubanId}/analyze`, {
             method: 'POST'
         });
@@ -205,19 +207,23 @@ async function analyzeMovie(doubanId) {
         
         const data = await response.json();
         
-        // 更新按钮状态
-        button.className = 'btn btn-analyze btn-analyzed';
-        button.innerHTML = '<i class="fas fa-check"></i> 已分析';
-        button.disabled = true;
+        // 分析完成后立即显示结果
+        viewAnalysis(doubanId);
         
-        // 显示成功提示
+        // 刷新电影列表以更新按钮状态
+        loadMoviesList();
+        
         showToast('分析完成', 'success');
         
     } catch (error) {
         console.error('分析失败:', error);
-        button.disabled = false;
-        button.innerHTML = originalText;
         showToast('分析失败，请稍后重试', 'error');
+        
+        // 恢复按钮状态
+        if (button) {
+            button.disabled = false;
+            button.innerHTML = originalText;
+        }
     }
 }
 
@@ -341,11 +347,12 @@ async function loadMoviesList() {
             return;
         }
         
-        // 初始化筛选选项
-        await initializeFilters(data.movies);
-        
         // 显示电影列表
         displayMoviesList(data.movies);
+        
+        // 初始化筛选选项
+        initializeFilters(data.movies);
+        
     } catch (error) {
         console.error('加载电影列表失败:', error);
         showToast('加载电影列表失败，请稍后重试', 'error');
@@ -382,14 +389,135 @@ function displayMoviesList(movies) {
                     导演：${movie.director || '未知'}<br>
                     ${movie.genre ? `类型：${movie.genre}` : ''}
                 </p>
-                <button class="btn ${movie.analyzed ? 'btn-analyze btn-analyzed' : 'btn-analyze'}" 
-                        onclick="analyzeMovie('${movie.douban_id}')"
-                        ${movie.analyzed ? 'disabled' : ''}>
-                    <i class="fas ${movie.analyzed ? 'fa-check' : 'fa-chart-bar'}"></i>
-                    ${movie.analyzed ? '已分析' : '分析评论'}
-                </button>
+                ${movie.analyzed ? 
+                    `<button class="btn btn-success" onclick="viewAnalysis('${movie.douban_id}')">
+                        <i class="fas fa-chart-bar"></i> 查看分析
+                     </button>` :
+                    `<button class="btn btn-primary" onclick="analyzeMovie('${movie.douban_id}')">
+                        <i class="fas fa-chart-line"></i> 分析评论
+                     </button>`
+                }
             </div>
         `;
         container.appendChild(card);
     });
+}
+
+// 添加查看分析结果的函数
+async function viewAnalysis(doubanId) {
+    try {
+        const modal = new bootstrap.Modal(document.getElementById('movieModal'));
+        modal.show();
+        
+        document.getElementById('modalAnalysisResults').innerHTML = `
+            <div class="text-center">
+                <div class="spinner-border text-primary" role="status">
+                    <span class="visually-hidden">加载中...</span>
+                </div>
+                <p class="mt-2">正在加载分析结果...</p>
+            </div>
+        `;
+        
+        const response = await fetch(`/api/movies/${doubanId}/analysis`);
+        if (!response.ok) {
+            const error = await response.json();
+            throw new Error(error.message || '获取分析结果失败');
+        }
+        
+        const data = await response.json();
+        
+        document.getElementById('modalAnalysisResults').innerHTML = `
+            <div class="analysis-results">
+                <!-- 概览统计 -->
+                <div class="stats-overview">
+                    <div class="stat-card">
+                        <div class="stat-label">总评论数</div>
+                        <div class="stat-value">${data.total_comments}</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">平均情感得分</div>
+                        <div class="stat-value">${data.avg_sentiment_score}</div>
+                    </div>
+                </div>
+
+                <!-- 词云图 -->
+                <div class="analysis-section">
+                    <div class="analysis-section-header">
+                        <h5>评论词云</h5>
+                    </div>
+                    <div class="analysis-section-body">
+                        <img src="${data.wordcloud_path}" alt="词云图">
+                    </div>
+                </div>
+
+                <!-- 情感分析 -->
+                <div class="analysis-section">
+                    <div class="analysis-section-header">
+                        <h5>情感分析</h5>
+                    </div>
+                    <div class="analysis-section-body">
+                        <img src="${data.sentiment_chart_path}" alt="情感分析">
+                        <div class="sentiment-stats">
+                            <div class="d-flex justify-content-around">
+                                <div class="sentiment-stat">
+                                    <h6 class="text-success">正面评价</h6>
+                                    <p class="stat-value">${data.sentiment_stats.positive}</p>
+                                </div>
+                                <div class="sentiment-stat">
+                                    <h6 class="text-secondary">中性评价</h6>
+                                    <p class="stat-value">${data.sentiment_stats.neutral}</p>
+                                </div>
+                                <div class="sentiment-stat">
+                                    <h6 class="text-danger">负面评价</h6>
+                                    <p class="stat-value">${data.sentiment_stats.negative}</p>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- 评论时间分布 -->
+                <div class="analysis-section">
+                    <div class="analysis-section-header">
+                        <h5>评论时间分布</h5>
+                    </div>
+                    <div class="analysis-section-body">
+                        <img src="${data.time_dist_path}" alt="时间分布">
+                    </div>
+                </div>
+
+                <!-- 评论长度分布 -->
+                <div class="analysis-section">
+                    <div class="analysis-section-header">
+                        <h5>评论长度分布</h5>
+                    </div>
+                    <div class="analysis-section-body">
+                        <img src="${data.length_dist_path}" alt="长度分布">
+                    </div>
+                </div>
+
+                <!-- 热门词汇 -->
+                <div class="analysis-section">
+                    <div class="analysis-section-header">
+                        <h5>热门词汇 Top10</h5>
+                    </div>
+                    <div class="analysis-section-body">
+                        <div class="top-words">
+                            ${data.top_words.map(([word, count]) => `
+                                <span class="word-tag">${word} (${count})</span>
+                            `).join('')}
+                        </div>
+                    </div>
+                </div>
+            </div>
+        `;
+    } catch (error) {
+        console.error('获取分析结果失败:', error);
+        document.getElementById('modalAnalysisResults').innerHTML = `
+            <div class="alert alert-danger">
+                <i class="fas fa-exclamation-circle"></i>
+                ${error.message || '获取分析结果失败，请稍后重试'}
+            </div>
+        `;
+    }
 } 

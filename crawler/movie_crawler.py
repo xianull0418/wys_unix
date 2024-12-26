@@ -8,12 +8,48 @@ import requests
 from bs4 import BeautifulSoup
 import time
 import random
+from selenium import webdriver
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from webdriver_manager.chrome import ChromeDriverManager
 
 class MovieCrawler(BaseCrawler):
     def __init__(self, db_manager):
         super().__init__()
         self.logger = logging.getLogger(__name__)
         self.db_manager = db_manager
+        self.driver = None
+        self.use_selenium = False  # 是否使用 Selenium
+        self._init_chrome_options()  # 预初始化 Chrome 选项
+    
+    def _init_chrome_options(self):
+        """初始化 Chrome 选项"""
+        self.chrome_options = Options()
+        self.chrome_options.add_argument('--headless')
+        self.chrome_options.add_argument('--no-sandbox')
+        self.chrome_options.add_argument('--disable-dev-shm-usage')
+        self.chrome_options.add_argument('--disable-gpu')
+        # 添加性能优化选项
+        self.chrome_options.add_argument('--disable-extensions')
+        self.chrome_options.add_argument('--disable-logging')
+        self.chrome_options.add_argument('--disable-notifications')
+        self.chrome_options.add_argument('--disable-default-apps')
+        self.chrome_options.add_argument('--disable-popup-blocking')
+        self.chrome_options.page_load_strategy = 'eager'  # 加快页面加载
+    
+    def _init_driver(self):
+        """初始化 Selenium WebDriver"""
+        if not self.driver:
+            self.chrome_options.add_argument(f'user-agent={self._get_random_user_agent()}')
+            self.driver = webdriver.Chrome(
+                service=Service(ChromeDriverManager().install()),
+                options=self.chrome_options
+            )
+            self.driver.set_page_load_timeout(10)  # 设置页面加载超时
+            self.driver.implicitly_wait(5)  # 设置隐式等待时间
     
     def crawl(self, *args, **kwargs):
         """实现抽象方法"""
@@ -100,154 +136,229 @@ class MovieCrawler(BaseCrawler):
     def search_movies(self, keyword: str) -> List[Dict[str, Any]]:
         """搜索电影"""
         try:
-            # 使用豆瓣搜索API
-            url = f"https://movie.douban.com/j/subject_suggest?q={keyword}"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'application/json, text/javascript, */*; q=0.01',
-                'Accept-Language': 'zh-CN,zh;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Referer': 'https://movie.douban.com/',
-                'Host': 'movie.douban.com',
-                'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120"',
-                'Sec-Ch-Ua-Mobile': '?0',
-                'Sec-Ch-Ua-Platform': '"Windows"',
-                'Sec-Fetch-Dest': 'empty',
-                'Sec-Fetch-Mode': 'cors',
-                'Sec-Fetch-Site': 'same-origin',
-                'X-Requested-With': 'XMLHttpRequest'
-            }
-            
-            # 随机延时
-            time.sleep(random.uniform(1, 2))
-            
-            session = requests.Session()
-            retries = 3
-            while retries > 0:
+            # 首先尝试使用普通请求
+            if not self.use_selenium:
                 try:
-                    response = session.get(
-                        url, 
-                        headers=headers,
-                        timeout=10,
-                        verify=True  # 启用SSL验证
-                    )
-                    response.raise_for_status()
-                    movies_data = response.json()
-                    break
+                    return self._search_with_api(keyword)
                 except Exception as e:
-                    retries -= 1
-                    if retries == 0:
-                        raise
-                    time.sleep(random.uniform(2, 3))  # 失败后随机延时
+                    self.logger.warning(f"API搜索失败，切换到Selenium模式: {str(e)}")
+                    self.use_selenium = True
+                    # 显示切换提示
+                    print("检测到豆瓣反爬限制，正在切换到浏览器模式...")
             
-            # 处理搜索结果
-            movies = []
-            for movie in movies_data[:10]:
-                if movie.get('type') == 'movie':
-                    try:
-                        # 每个详情请求之间添加随机延时
-                        time.sleep(random.uniform(1, 2))
-                        movie_info = self._get_movie_detail_simple(movie)
-                        if movie_info:
-                            movies.append(movie_info)
-                    except Exception as e:
-                        self.logger.error(f"获取电影详情失败: {str(e)}")
-                        continue
-            
-            return movies
+            # 如果API请求失败，使用Selenium
+            return self._search_with_selenium(keyword)
             
         except Exception as e:
             self.logger.error(f"搜索电影失败: {str(e)}")
             return []
     
-    def _get_movie_detail_simple(self, movie_data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-        """获取单个电影的简单信息（用于搜索结果）"""
+    def _search_with_api(self, keyword: str) -> List[Dict[str, Any]]:
+        """使用API搜索"""
+        url = f"https://movie.douban.com/j/subject_suggest?q={keyword}"
+        headers = {
+            'Accept': 'application/json, text/javascript, */*; q=0.01',
+            'Referer': 'https://movie.douban.com/',
+            'X-Requested-With': 'XMLHttpRequest',
+            'User-Agent': self._get_random_user_agent()
+        }
+        
+        response = requests.get(url, headers=headers, timeout=5)
+        if '检测到有异常请求' in response.text:
+            raise Exception("检测到反爬限制")
+            
+        movies_data = response.json()
+        return self._process_api_results(movies_data)
+    
+    def _search_with_selenium(self, keyword: str) -> List[Dict[str, Any]]:
+        """使用Selenium搜索"""
         try:
-            movie_info = {
-                'douban_id': movie_data.get('id'),
-                'name': movie_data.get('title'),
-                'year': movie_data.get('year'),
-                'img': movie_data.get('img'),
-                'sub_title': '',
-                'is_added': self.db_manager.check_movie_exists(movie_data.get('id'))
-            }
+            self._init_driver()
+            url = f"https://movie.douban.com/subject_search?search_text={keyword}"
+            self.driver.get(url)
             
-            # 处理图片URL
-            if movie_info['img']:
-                movie_info['img'] = movie_info['img'].replace('s_ratio', 'l_ratio')
-            
-            # 获取详细信息
-            detail_url = f"https://movie.douban.com/subject/{movie_info['douban_id']}/"
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                'Accept-Language': 'zh-CN,zh;q=0.9',
-                'Accept-Encoding': 'gzip, deflate, br',
-                'Connection': 'keep-alive',
-                'Host': 'movie.douban.com',
-                'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120"',
-                'Sec-Ch-Ua-Mobile': '?0',
-                'Sec-Ch-Ua-Platform': '"Windows"',
-                'Sec-Fetch-Dest': 'document',
-                'Sec-Fetch-Mode': 'navigate',
-                'Sec-Fetch-Site': 'none',
-                'Sec-Fetch-User': '?1',
-                'Upgrade-Insecure-Requests': '1'
-            }
-            
-            session = requests.Session()
-            response = session.get(
-                detail_url, 
-                headers=headers,
-                timeout=10,
-                verify=True
+            # 等待搜索结果加载，使用更短的超时时间
+            WebDriverWait(self.driver, 5).until(
+                EC.presence_of_element_located((By.CLASS_NAME, 'item-root'))
             )
-            response.raise_for_status()
             
-            soup = BeautifulSoup(response.text, 'html.parser')
+            # 获取页面内容并立即解析
+            movies = self._process_selenium_results(self.driver.page_source)
+            return movies
             
-            # 获取评分和导演
-            rating_element = soup.select_one('#interest_sectl strong.rating_num')
-            movie_info['rating'] = float(rating_element.text.strip()) if rating_element else None
+        finally:
+            if self.driver:
+                self.driver.quit()
+                self.driver = None
+    
+    def _process_api_results(self, movies_data: List[Dict]) -> List[Dict[str, Any]]:
+        """处理API搜索结果"""
+        movies = []
+        for movie in movies_data[:10]:
+            if movie.get('type') == 'movie':
+                try:
+                    # 获取电影详情以获取评分和导演信息
+                    detail_url = f"https://movie.douban.com/subject/{movie.get('id')}/"
+                    headers = {
+                        'User-Agent': self._get_random_user_agent(),
+                        'Referer': 'https://movie.douban.com/'
+                    }
+                    
+                    # 添加随机延时避免被封
+                    time.sleep(random.uniform(1, 2))
+                    
+                    detail_response = requests.get(detail_url, headers=headers, timeout=5)
+                    detail_soup = BeautifulSoup(detail_response.text, 'html.parser')
+                    
+                    # 获取评分
+                    rating_element = detail_soup.select_one('#interest_sectl strong.rating_num')
+                    rating = float(rating_element.text.strip()) if rating_element else None
+                    
+                    # 获取导演
+                    director = ''
+                    director_element = detail_soup.select_one('a[rel="v:directedBy"]')
+                    if director_element:
+                        director = director_element.text.strip()
+                    
+                    movie_info = {
+                        'douban_id': movie.get('id'),
+                        'name': movie.get('title', ''),
+                        'year': movie.get('year', ''),
+                        'img': movie.get('img', '').replace('s_ratio', 'l_ratio'),
+                        'director': director,  # 使用从详情页获取的导演信息
+                        'rating': rating,
+                        'sub_title': '',
+                        'is_added': self.db_manager.check_movie_exists(movie.get('id'))
+                    }
+                    movies.append(movie_info)
+                except Exception as e:
+                    self.logger.error(f"处理电影信息失败: {str(e)}")
+        return movies
+    
+    def _process_selenium_results(self, page_source: str) -> List[Dict[str, Any]]:
+        """处理Selenium搜索结果"""
+        soup = BeautifulSoup(page_source, 'html.parser')
+        movies = []
+        
+        for item in soup.select('.item-root')[:10]:
+            try:
+                movie_info = self._extract_movie_info(item)
+                if movie_info:
+                    movies.append(movie_info)
+            except Exception as e:
+                self.logger.error(f"处理电影信息失败: {str(e)}")
+                continue
+        
+        return movies
+    
+    def _extract_movie_info(self, item: BeautifulSoup) -> Optional[Dict[str, Any]]:
+        """从搜索结果项提取电影信息"""
+        try:
+            link = item.select_one('a.cover-link')
+            if not link:
+                return None
             
-            director_element = soup.select_one('a[rel="v:directedBy"]')
-            movie_info['director'] = director_element.text.strip() if director_element else '未知'
+            douban_id = re.search(r'subject/(\d+)/', link.get('href', '')).group(1)
+            title = item.select_one('.title')
+            name = title.text.strip() if title else ''
             
-            return movie_info
+            # 提取年份
+            year = ''
+            year_match = re.search(r'\((\d{4})\)', name)
+            if year_match:
+                year = year_match.group(1)
+                name = re.sub(r'\s*\(\d{4}\)\s*', '', name)
             
-        except Exception as e:
-            self.logger.error(f"获取电影详情失败: {str(e)}")
+            return {
+                'douban_id': douban_id,
+                'name': name,
+                'year': year,
+                'img': item.select_one('img').get('src', '').replace('s_ratio', 'l_ratio') if item.select_one('img') else '',
+                'director': self._extract_director(item),
+                'rating': self._extract_rating(item),
+                'sub_title': '',
+                'is_added': self.db_manager.check_movie_exists(douban_id)
+            }
+        except Exception:
             return None
     
-    def get_movie_comments(self, movie_id: str, max_pages: int = 5) -> List[Dict[str, Any]]:
+    def get_movie_comments(self, douban_id: str, max_pages: int = 5) -> List[Dict[str, Any]]:
         """获取电影评论"""
+        comments = []
         try:
-            url = f"{self.config.DOUBAN_URL}/subject/{movie_id}/comments"
-            comments = []
-            
             for page in range(max_pages):
-                page_url = f"{url}?start={page * 20}&limit=20&sort=new_score"
-                soup = self._get_soup(page_url)
+                url = f"https://movie.douban.com/subject/{douban_id}/comments"
+                params = {
+                    'start': page * 20,
+                    'limit': 20,
+                    'status': 'P',
+                    'sort': 'new_score'
+                }
+                headers = {
+                    'User-Agent': self._get_random_user_agent(),
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+                    'Connection': 'close',
+                    'Host': 'movie.douban.com',
+                    'Referer': 'https://movie.douban.com/'
+                }
                 
+                response = requests.get(url, params=params, headers=headers, timeout=10)
+                soup = BeautifulSoup(response.text, 'html.parser')
+                
+                # 获取评论区域
                 comment_items = soup.find_all('div', class_='comment-item')
+                
                 for item in comment_items:
                     try:
+                        # 获取用户名
                         user = item.find('span', class_='comment-info').find('a').text.strip()
-                        comment_text = item.find('span', class_='short').text.strip()
-                        date = item.find('span', class_='comment-time').text.strip()
                         
-                        comments.append({
-                            'user': user,
-                            'comment_text': comment_text,
-                            'date': datetime.strptime(date, '%Y-%m-%d'),
-                            'sentiment': None  # 情感分析将在后续处理
-                        })
+                        # 获取评论内容
+                        comment_text = item.find('span', class_='short').text.strip()
+                        
+                        # 获取评论时间并处理格式
+                        date_str = item.find('span', class_='comment-time').get('title', '').strip()
+                        if not date_str:  # 如果title属性为空，获取文本内容
+                            date_str = item.find('span', class_='comment-time').text.strip()
+                        
+                        try:
+                            # 尝试解析完整的日期时间格式
+                            date = datetime.strptime(date_str, '%Y-%m-%d %H:%M:%S')
+                        except ValueError:
+                            try:
+                                # 尝试解析只有日期的格式
+                                date = datetime.strptime(date_str, '%Y-%m-%d')
+                            except ValueError:
+                                # 如果都失败了，只保留日期部分
+                                date_str = date_str.split()[0]  # 取第一部分（日期）
+                                date = datetime.strptime(date_str, '%Y-%m-%d')
+                        
+                        # 只有评论内容不为空时才添加
+                        if comment_text.strip():
+                            comments.append({
+                                'user': user,
+                                'comment_text': comment_text,
+                                'date': date,
+                                'sentiment': None
+                            })
+                        
                     except Exception as e:
                         self.logger.error(f"解析评论失败: {str(e)}")
                         continue
                 
-                self._handle_rate_limit()
+                # 检查是否获取到评论
+                if not comment_items:
+                    self.logger.warning(f"页面 {page + 1} 未获取到评论，可能需要登录或遇到反爬限制")
+                    break
+                
+                # 添加随机延时避免被封
+                time.sleep(random.uniform(2, 4))
+            
+            if not comments:
+                self.logger.warning("未获取到任何有效评论")
+            else:
+                self.logger.info(f"成功获取 {len(comments)} 条评论")
             
             return comments
             
