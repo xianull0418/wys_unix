@@ -11,6 +11,7 @@
 - 数据分析：SnowNLP + jieba + wordcloud + matplotlib
 
 ## 项目结构
+```txt
 douban_movie/
 ├── config/ # 配置文件目录
 │ └── config.py # 系统配置（数据库连接、爬虫参数等）
@@ -39,6 +40,7 @@ douban_movie/
 │ └── helpers.py # 辅助函数
 ├── requirements.txt # 项目依赖
 └── main.py # 主程序入口
+```
 
 
 ## 核心功能实现
