@@ -167,20 +167,34 @@ class SentimentAnalyzer:
                 '的', '了', '和', '是', '就', '都', '而', '及', '与', '着',
                 '之', '在', '也', '这', '那', '有', '我', '你', '他', '她',
                 '它', '们', '个', '上', '下', '不', '没', '很', '到', '去',
-                '又', '这个', '那个', '这样', '那样', '什么', '为什么', '��么',
+                '又', '这个', '那个', '这样', '那样', '什么', '为什么', '怎么',
                 '电影', '片子', '剧情', '感觉', '觉得', '认为', '还是', '比较',
                 '一个', '一部', '这部', '这种', '那种', '一样', '这么', '那么',
-                '挺', '真的', '确实', '其实', '可能', '应该', '一直', '一定'
+                '挺', '真的', '确实', '其实', '可能', '应该', '一直', '一定',
+                '但是', '因为', '所以', '如果', '虽然', '就是', '只是', '但',
+                '啊', '吧', '啦', '呢', '呀', '了', '哦', '哈', '嗯', '噢',
+                '的话', '来说', '而且', '只有', '由于', '一些', '一下', '一点',
+                '看', '说', '讲', '写', '想', '做', '看到', '听到', '说到'
             ])
             
             # 分词并过滤
             words = []
             for word in jieba.cut(text):
-                if (len(word) > 1 and  # 过滤单字
-                    word not in stop_words and  # 过滤停用词
-                    not word.isdigit() and  # 过滤纯数字
-                    not bool(re.search(r'^\w+$', word))):  # 过滤纯英文和数字组合
-                    words.append(word)
+                if all([
+                    len(word.strip()) > 1,  # 过滤单字
+                    word.strip() not in stop_words,  # 过滤停用词
+                    not word.isdigit(),  # 过滤纯数字
+                    not bool(re.search(r'^[a-zA-Z0-9_]+$', word.strip()))  # 过滤纯英文和数字组合
+                ]):
+                    words.append(word.strip())
+            
+            if not words:
+                self.logger.warning("过滤后没有剩余词语，使用原始分词结果")
+                # 如果过滤太严格，退回到简单的分词结果
+                words = [word for word in jieba.cut(text) if len(word.strip()) > 1]
+            
+            if not words:
+                raise ValueError("无法提取有效词语，可能评论内容过短或无效")
             
             word_space_split = ' '.join(words)
             
@@ -193,7 +207,8 @@ class SentimentAnalyzer:
                 max_words=100,  # 最多显示100个词
                 min_font_size=10,
                 max_font_size=80,
-                random_state=42  # 固定随机状态，使每次生成的词云位置相对固定
+                random_state=42,  # 固定随机状态，使每次生成的词云位置相对固定
+                collocations=False  # 避免词语重复
             ).generate(word_space_split)
             
             # 绘制词云图
@@ -266,7 +281,7 @@ class SentimentAnalyzer:
         plt.close()
     
     def _generate_length_distribution(self, length_stats: Dict[str, int], save_path: str) -> None:
-        """生成评论长度分布图"""
+        """生成评论长���分布图"""
         plt.figure(figsize=(8, 6))
         categories = ['短评论\n(<50字)', '中等长度\n(50-200字)', '长评论\n(>200字)']
         values = [length_stats['short'], length_stats['medium'], length_stats['long']]
