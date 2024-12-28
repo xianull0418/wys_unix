@@ -177,15 +177,38 @@ class MovieCrawler(BaseCrawler):
             url = f"https://movie.douban.com/subject_search?search_text={keyword}"
             self.driver.get(url)
             
-            # 等待搜索结果加载，使用更短的超时时间
-            WebDriverWait(self.driver, 5).until(
-                EC.presence_of_element_located((By.CLASS_NAME, 'item-root'))
-            )
+            # 等待搜索结果加载
+            try:
+                WebDriverWait(self.driver, 10).until(
+                    EC.presence_of_element_located((By.CLASS_NAME, 'item-root'))
+                )
+            except Exception as e:
+                self.logger.warning(f"等待搜索结果超时: {str(e)}")
+                return []
             
-            # 获取页面内容并立即解析
-            movies = self._process_selenium_results(self.driver.page_source)
+            # 获取页面内容并解析
+            movies = []
+            soup = BeautifulSoup(self.driver.page_source, 'lxml')
+            items = soup.select('.item-root')
+            
+            if not items:
+                self.logger.warning("未找到搜索结果")
+                return []
+            
+            for item in items[:10]:  # 只处理前10个结果
+                try:
+                    movie_info = self._extract_movie_info(item)
+                    if movie_info:
+                        movies.append(movie_info)
+                except Exception as e:
+                    self.logger.error(f"处理电影信息失败: {str(e)}")
+                    continue
+            
             return movies
             
+        except Exception as e:
+            self.logger.error(f"Selenium搜索失败: {str(e)}")
+            return []
         finally:
             if self.driver:
                 self.driver.quit()
@@ -267,19 +290,45 @@ class MovieCrawler(BaseCrawler):
             year_match = re.search(r'\((\d{4})\)', name)
             if year_match:
                 year = year_match.group(1)
-                name = re.sub(r'\s*\(\d{4}\)\s*', '', name)
+                name = re.sub(r'\s*\(\d{4})\s*', '', name)
+            
+            # 获取评分
+            rating = None
+            rating_element = item.select_one('.rating_nums')
+            if rating_element and rating_element.text.strip():
+                try:
+                    rating = float(rating_element.text.strip())
+                except ValueError:
+                    rating = None
+            
+            # 获取导演等信息
+            info = item.select_one('.subject-cast')
+            director = ''
+            if info:
+                info_text = info.text.strip()
+                director_match = re.search(r'导演:\s*(.*?)(?:\s+|$)', info_text)
+                if director_match:
+                    director = director_match.group(1).strip()
+            
+            # 获取图片URL
+            img_url = ''
+            img_element = item.select_one('img')
+            if img_element:
+                img_url = img_element.get('src', '').replace('s_ratio', 'l_ratio')
             
             return {
                 'douban_id': douban_id,
                 'name': name,
                 'year': year,
-                'img': item.select_one('img').get('src', '').replace('s_ratio', 'l_ratio') if item.select_one('img') else '',
-                'director': self._extract_director(item),
-                'rating': self._extract_rating(item),
+                'img': img_url,
+                'director': director,
+                'rating': rating,
                 'sub_title': '',
+                'genre': '',  # 添加空的genre字段
                 'is_added': self.db_manager.check_movie_exists(douban_id)
             }
-        except Exception:
+        except Exception as e:
+            self.logger.error(f"提取电影信息失败: {str(e)}")
             return None
     
     def get_movie_comments(self, douban_id: str, max_pages: int = 5) -> List[Dict[str, Any]]:
