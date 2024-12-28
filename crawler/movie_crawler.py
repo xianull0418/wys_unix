@@ -15,6 +15,7 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from webdriver_manager.chrome import ChromeDriverManager
+import os
 
 class MovieCrawler(BaseCrawler):
     def __init__(self, db_manager):
@@ -28,28 +29,48 @@ class MovieCrawler(BaseCrawler):
     def _init_chrome_options(self):
         """初始化 Chrome 选项"""
         self.chrome_options = Options()
-        self.chrome_options.add_argument('--headless')
+        self.chrome_options.add_argument('--headless')  # 无头模式
         self.chrome_options.add_argument('--no-sandbox')
         self.chrome_options.add_argument('--disable-dev-shm-usage')
         self.chrome_options.add_argument('--disable-gpu')
-        # 添加性能优化选项
         self.chrome_options.add_argument('--disable-extensions')
         self.chrome_options.add_argument('--disable-logging')
         self.chrome_options.add_argument('--disable-notifications')
         self.chrome_options.add_argument('--disable-default-apps')
         self.chrome_options.add_argument('--disable-popup-blocking')
-        self.chrome_options.page_load_strategy = 'eager'  # 加快页面加载
+        self.chrome_options.add_argument('--window-size=1920,1080')  # 设置窗口大小
+        self.chrome_options.add_argument('--ignore-certificate-errors')  # 忽略证书错误
+        self.chrome_options.add_argument('--ignore-ssl-errors')  # 忽略SSL错误
+        self.chrome_options.page_load_strategy = 'eager'
     
     def _init_driver(self):
         """初始化 Selenium WebDriver"""
         if not self.driver:
-            self.chrome_options.add_argument(f'user-agent={self._get_random_user_agent()}')
-            self.driver = webdriver.Chrome(
-                service=Service(ChromeDriverManager().install()),
-                options=self.chrome_options
-            )
-            self.driver.set_page_load_timeout(10)  # 设置页面加载超时
-            self.driver.implicitly_wait(5)  # 设置隐式等待时间
+            try:
+                # 设置下载路径为当前目录
+                chrome_driver_path = os.path.join(os.getcwd(), 'chromedriver')
+                os.environ['WDM_LOCAL'] = '1'  # 使用本地缓存
+                os.environ['WDM_SSL_VERIFY'] = '0'  # 禁用SSL验证
+                
+                # 添加随机User-Agent
+                self.chrome_options.add_argument(f'user-agent={self._get_random_user_agent()}')
+                
+                # 使用 Service 对象
+                service = Service()
+                self.driver = webdriver.Chrome(
+                    service=service,
+                    options=self.chrome_options
+                )
+                
+                # 设置超时时间
+                self.driver.set_page_load_timeout(20)
+                self.driver.implicitly_wait(10)
+                
+            except Exception as e:
+                self.logger.error(f"初始化WebDriver失败: {str(e)}")
+                if self.driver:
+                    self.driver.quit()
+                raise
     
     def crawl(self, *args, **kwargs):
         """实现抽象方法"""
@@ -172,47 +193,58 @@ class MovieCrawler(BaseCrawler):
     
     def _search_with_selenium(self, keyword: str) -> List[Dict[str, Any]]:
         """使用Selenium搜索"""
-        try:
-            self._init_driver()
-            url = f"https://movie.douban.com/subject_search?search_text={keyword}"
-            self.driver.get(url)
-            
-            # 等待搜索结果加载
+        retry_count = 0
+        max_retries = 3
+        
+        while retry_count < max_retries:
             try:
-                WebDriverWait(self.driver, 10).until(
-                    EC.presence_of_element_located((By.CLASS_NAME, 'item-root'))
-                )
-            except Exception as e:
-                self.logger.warning(f"等待搜索结果超时: {str(e)}")
-                return []
-            
-            # 获取页面内容并解析
-            movies = []
-            soup = BeautifulSoup(self.driver.page_source, 'lxml')
-            items = soup.select('.item-root')
-            
-            if not items:
-                self.logger.warning("未找到搜索结果")
-                return []
-            
-            for item in items[:10]:  # 只处理前10个结果
+                self._init_driver()
+                url = f"https://movie.douban.com/subject_search?search_text={keyword}"
+                self.driver.get(url)
+                
+                # 等待搜索结果加载
                 try:
-                    movie_info = self._extract_movie_info(item)
-                    if movie_info:
-                        movies.append(movie_info)
+                    WebDriverWait(self.driver, 15).until(
+                        EC.presence_of_element_located((By.CLASS_NAME, 'item-root'))
+                    )
                 except Exception as e:
-                    self.logger.error(f"处理电影信息失败: {str(e)}")
-                    continue
-            
-            return movies
-            
-        except Exception as e:
-            self.logger.error(f"Selenium搜索失败: {str(e)}")
-            return []
-        finally:
-            if self.driver:
-                self.driver.quit()
-                self.driver = None
+                    self.logger.warning(f"等待搜索结果超时: {str(e)}")
+                    return []
+                
+                # 获取页面内容并解析
+                movies = []
+                soup = BeautifulSoup(self.driver.page_source, 'lxml')
+                items = soup.select('.item-root')
+                
+                if not items:
+                    self.logger.warning("未找到搜索结果")
+                    return []
+                
+                for item in items[:10]:
+                    try:
+                        movie_info = self._extract_movie_info(item)
+                        if movie_info:
+                            movies.append(movie_info)
+                    except Exception as e:
+                        self.logger.error(f"处理电影信息失败: {str(e)}")
+                        continue
+                
+                return movies
+                
+            except Exception as e:
+                retry_count += 1
+                self.logger.error(f"Selenium搜索失败 (尝试 {retry_count}/{max_retries}): {str(e)}")
+                if retry_count >= max_retries:
+                    return []
+                time.sleep(2)  # 等待2秒后重试
+                
+            finally:
+                if self.driver:
+                    try:
+                        self.driver.quit()
+                    except:
+                        pass
+                    self.driver = None
     
     def _process_api_results(self, movies_data: List[Dict]) -> List[Dict[str, Any]]:
         """处理API搜索结果"""
